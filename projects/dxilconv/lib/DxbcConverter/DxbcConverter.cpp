@@ -2679,13 +2679,16 @@ void DxbcConverter::ConvertInstructions(D3D10ShaderBinary::CShaderCodeParser &Pa
       LoadOperand(InLevel, Inst, uOpLevel, CMask::MakeXMask(), CompType::getF32());
       Args[10] = InLevel[0];
 
-      // Function call.
-      CompType DstType = DXBC::GetCompTypeWithMinPrec(CompType::getF32(), Inst.m_Operands[uOpOutput].m_MinPrecision);
-      Type *pDstType = DstType.GetLLVMType(m_Ctx);
-      Function *F = m_pOP->GetOpFunc(OpCode, pDstType);
-      Value *pOpRet = m_pBuilder->CreateCall(F, Args);
+      if (Args[10] != nullptr) {
+        // Function call.
+        CompType DstType = DXBC::GetCompTypeWithMinPrec(
+            CompType::getF32(), Inst.m_Operands[uOpOutput].m_MinPrecision);
+        Type *pDstType = DstType.GetLLVMType(m_Ctx);
+        Function *F = m_pOP->GetOpFunc(OpCode, pDstType);
+        Value *pOpRet = m_pBuilder->CreateCall(F, Args);
 
-      StoreResRetOutputAndStatus(Inst, pOpRet, DstType);
+        StoreResRetOutputAndStatus(Inst, pOpRet, DstType);
+      }
       break;
     }
 
@@ -5950,39 +5953,44 @@ void DxbcConverter::LoadOperand(OperandValue &SrcVal,
       BYTE Comp = OVH.GetComp();
       // Retrieve signature element.
       const DxilSignatureElement *E = m_pInputSignature->GetElement(Register, Comp);
-      CompType DxbcValueType = E->GetCompType();
-      if (DxbcValueType.IsBoolTy()) {
-        DxbcValueType = CompType::getI32();
+      if (E != nullptr) {
+        CompType DxbcValueType = E->GetCompType();
+        if (DxbcValueType.IsBoolTy()) {
+          DxbcValueType = CompType::getI32();
+        }
+        Type *pDxbcValueType = DxbcValueType.GetLLVMType(m_Ctx);
+
+        MutableArrayRef<Value *> Args;
+        Value *Args1[1];
+        Value *Args5[5];
+
+        if (E->GetKind() == DXIL::SemanticKind::SampleIndex) {
+          // Use SampleIndex intrinsic instead of LoadInput
+          Args = Args1;
+          OpCode = OP::OpCode::SampleIndex;
+        } else {
+          Args = Args5;
+          // Make row/col index relative within element.
+          Value *pRowIndexValueRel = m_pBuilder->CreateSub(
+              pRowIndexValue, m_pOP->GetU32Const(E->GetStartRow()));
+          Args[1] =
+              m_pOP->GetU32Const(E->GetID()); // Input signature element ID
+          Args[2] = pRowIndexValueRel;        // Row, relative to the element
+          Args[3] = m_pOP->GetU8Const(
+              Comp - E->GetStartCol()); // Col, relative to the element
+          Args[4] = pUnitIndexValue;    // Vertex/point index
+        }
+
+        Args[0] = m_pOP->GetU32Const((unsigned)OpCode); // OpCode
+
+        Function *F = m_pOP->GetOpFunc(OpCode, pDxbcValueType);
+        Value *pValue = m_pBuilder->CreateCall(F, Args);
+
+        pValue = CastDxbcValue(pValue, DxbcValueType, ValueType);
+        pValue = ApplyOperandModifiers(pValue, O);
+
+        OVH.SetValue(pValue);
       }
-      Type *pDxbcValueType = DxbcValueType.GetLLVMType(m_Ctx);
-
-      MutableArrayRef<Value *> Args;
-      Value *Args1[1];
-      Value *Args5[5];
-
-      if (E->GetKind() == DXIL::SemanticKind::SampleIndex) {
-        // Use SampleIndex intrinsic instead of LoadInput
-        Args = Args1;
-        OpCode = OP::OpCode::SampleIndex;
-      } else {
-        Args = Args5;
-        // Make row/col index relative within element.
-        Value *pRowIndexValueRel = m_pBuilder->CreateSub(pRowIndexValue, m_pOP->GetU32Const(E->GetStartRow()));
-        Args[1] = m_pOP->GetU32Const(E->GetID());             // Input signature element ID
-        Args[2] = pRowIndexValueRel;                          // Row, relative to the element
-        Args[3] = m_pOP->GetU8Const(Comp - E->GetStartCol()); // Col, relative to the element
-        Args[4] = pUnitIndexValue;                            // Vertex/point index
-      }
-
-      Args[0] = m_pOP->GetU32Const((unsigned)OpCode);       // OpCode
-
-      Function *F = m_pOP->GetOpFunc(OpCode, pDxbcValueType);
-      Value *pValue = m_pBuilder->CreateCall(F, Args);
-
-      pValue = CastDxbcValue(pValue, DxbcValueType, ValueType);
-      pValue = ApplyOperandModifiers(pValue, O);
-
-      OVH.SetValue(pValue);
     }
 
     break;
